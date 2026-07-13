@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "data-breach-detector"
+version = "0.1.0"
+description = "Read-only breach-intelligence MCP: reports THAT a domain was breached and which data types leaked, from public feeds (HaveIBeenPwned, ransomwatch). Never the leaked data."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "beepboop2025" }]
+keywords = ["mcp", "security", "threat-intelligence", "breach", "haveibeenpwned", "ransomware"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+]
+dependencies = [
+    "mcp>=1.2.0",
+    "httpx>=0.27",
+]
+
+[project.urls]
+Homepage = "https://github.com/beepboop2025/data-breach-detector"
+Repository = "https://github.com/beepboop2025/data-breach-detector"
+
+[project.scripts]
+data-breach-detector = "data_breach_detector.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/data_breach_detector"]
