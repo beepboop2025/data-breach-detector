@@ -25,8 +25,12 @@ import re
 import time
 from datetime import datetime, timezone
 
+from typing import Annotated
+
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from .classifier import classify_threat
 
@@ -159,12 +163,27 @@ def _days_ago(iso: str | None) -> float:
         return 1e9
 
 
-@mcp.tool()
-async def breach_news(since_days: int = 30, sector: str | None = None, limit: int = 25) -> dict:
-    """Recent breach and ransomware DISCLOSURES from public threat-intel feeds
-    (HaveIBeenPwned, ransomwatch). Metadata only — entity, date, scale, exposed
-    data TYPES, threat level — never the leaked data. Optional sector/keyword
-    filter (e.g. "bank", "health", "crypto")."""
+@mcp.tool(annotations=ToolAnnotations(
+    title="Recent breach disclosures",
+    readOnlyHint=True, idempotentHint=True, openWorldHint=True))
+async def breach_news(
+    since_days: Annotated[int, Field(
+        description="look-back window in days over disclosure dates (default 30)",
+        ge=1)] = 30,
+    sector: Annotated[str | None, Field(
+        description="optional keyword filter over title, summary, categories and "
+                    "exposed data types, e.g. 'bank', 'health', 'crypto'")] = None,
+    limit: Annotated[int, Field(
+        description="maximum disclosures to return (default 25)",
+        ge=1, le=100)] = 25,
+) -> dict:
+    """Read recent breach and ransomware DISCLOSURES from public threat-intel
+    feeds (HaveIBeenPwned's breach directory and the ransomwatch leak-site
+    tracker), newest first. Every row is metadata only — entity, date, scale,
+    exposed data TYPES, threat level and source — never the leaked data, and a
+    redaction pass strips anything credential-shaped before it is returned.
+    Use sector to narrow to an industry keyword; for one specific
+    organization, use check_exposure instead."""
     feed = await _feed()
     rows = [r for r in feed if _days_ago(r.get("sort_date")) <= since_days]
     if sector:
@@ -177,12 +196,23 @@ async def breach_news(since_days: int = 30, sector: str | None = None, limit: in
             "note": "Disclosure metadata only. No leaked records are served by this tool."}
 
 
-@mcp.tool()
-async def check_exposure(query: str, since_days: int = 100000) -> dict:
-    """Does a domain, company or brand appear in public breach or ransomware
-    DISCLOSURES? The HaveIBeenPwned model: yes/no plus metadata (when, scale,
-    which data types were exposed, severity, source) — never the exposed
-    records. Triage only; confirm through authorized channels."""
+@mcp.tool(annotations=ToolAnnotations(
+    title="Entity exposure check",
+    readOnlyHint=True, idempotentHint=True, openWorldHint=True))
+async def check_exposure(
+    query: Annotated[str, Field(
+        description="domain, company or brand to look up, e.g. 'example.com' or 'Acme'")],
+    since_days: Annotated[int, Field(
+        description="optional look-back window in days; the default covers all history",
+        ge=1)] = 100000,
+) -> dict:
+    """Answer whether a domain, company or brand appears in public breach or
+    ransomware DISCLOSURES: yes/no with mention count, worst threat level,
+    total accounts exposed across matches, the exposed data TYPES, and the
+    matching disclosure metadata — never the exposed records themselves. This
+    is a triage signal built from disclosure feeds, not proof of compromise;
+    confirm through authorized channels before acting. For a general
+    recent-news sweep across all entities, use breach_news instead."""
     q = query.strip().lower()
     if not q:
         return {"error": "query is required (a domain, company or brand)"}
@@ -202,11 +232,19 @@ async def check_exposure(query: str, since_days: int = 100000) -> dict:
     }
 
 
-@mcp.tool()
-async def assess_threat(text: str) -> dict:
-    """Triage a piece of security text (advisory, forum post, alert): classify
-    threat level, categories and recommended action. Pure analysis of text you
-    supply — collects nothing, reaches no network."""
+@mcp.tool(annotations=ToolAnnotations(
+    title="Threat-text triage",
+    readOnlyHint=True, idempotentHint=True, openWorldHint=False))
+async def assess_threat(
+    text: Annotated[str, Field(
+        description="the security text to classify — an advisory, alert or forum post")],
+) -> dict:
+    """Classify a piece of security text you supply — an advisory, alert or
+    forum post — into a threat level, matched categories, financial-target
+    flags, a confidence score and a recommended action. Pure local analysis:
+    it collects nothing, stores nothing and reaches no network; the text never
+    leaves the server. Use it to triage findings surfaced by breach_news or
+    from your own monitoring."""
     if not text or not text.strip():
         return {"error": "text is required"}
     r = classify_threat(text)
@@ -215,9 +253,15 @@ async def assess_threat(text: str) -> dict:
             "recommended_action": r["recommended_action"]}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(
+    title="Feed sources & cache state",
+    readOnlyHint=True, idempotentHint=True, openWorldHint=True))
 async def feed_sources() -> dict:
-    """List the public feeds this detector aggregates and how fresh the cache is."""
+    """List the public disclosure feeds this server aggregates (HaveIBeenPwned's
+    breach directory and the ransomwatch leak-site tracker), how many
+    disclosures are cached per source, and the cache age in seconds. Takes no
+    arguments. Also states the scope plainly: public feeds only — no .onion
+    access, no arbitrary fetching or crawling, no credential or PII output."""
     feed = await _feed()
     by_source: dict[str, int] = {}
     for r in feed:
