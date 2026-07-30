@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "data-breach-detector"
-version = "0.1.1"
+version = "0.1.2"
 description = "Read-only breach-intelligence MCP: reports THAT a domain was breached and which data types leaked, from public feeds (HaveIBeenPwned, ransomwatch). Never the leaked data."
 readme = "README.md"
 requires-python = ">=3.10"
