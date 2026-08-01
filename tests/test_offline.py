@@ -126,6 +126,25 @@ def test_history_data_type_and_min_accounts():
     assert [r["id"] for r in out["incidents"]] == ["hibp:Adobe"]
 
 
+def test_slim_trims_narrative_but_keeps_facts():
+    long_summary = "x" * 400
+    r = _rec(entity="a.example", summary=long_summary, pwn_count=5,
+             exposed_data_types=["Passwords"], threat_level="high")
+    s = S._slim(r)
+    assert len(s["summary"]) <= 141 and s["summary"].endswith("…")
+    for field in ("entity", "pwn_count", "exposed_data_types", "threat_level",
+                  "source", "disclosed_at"):
+        assert field in s
+    assert S._slim(_rec(summary=""))["summary"] == ""
+
+
+def test_list_payloads_are_slimmed():
+    out = run(S.check_exposure("acme.example"))
+    assert all(len(m.get("summary", "")) <= 141 for m in out["matches"])
+    hist = run(S.breach_history(limit=5))
+    assert hist["returned"] == min(hist["count"], 5)
+
+
 def test_timeline_repeat_victim_judgment():
     out = run(S.breach_timeline("acme.example"))
     assert out["repeat_victim"] is True

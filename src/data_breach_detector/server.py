@@ -330,6 +330,20 @@ def _year_of(r: dict) -> int | None:
     return None
 
 
+def _slim(r: dict, summary_cap: int = 140) -> dict:
+    """Compact projection for list payloads.
+
+    Full records carry prose summaries that add up fast: a 30-row timeline ran
+    to ~13k tokens, which is enough to stall an agent's tool loop. Every field
+    an analyst acts on is kept; only the narrative is trimmed.
+    """
+    out = dict(r)
+    summary = r.get("summary") or ""
+    out["summary"] = (summary[:summary_cap].rstrip() + "…"
+                      if len(summary) > summary_cap else summary)
+    return out
+
+
 def _haystack(r: dict) -> str:
     return (r.get("entity", "") + " " + r.get("title", "") + " "
             + r.get("summary", "") + " " + " ".join(r.get("categories", []))
@@ -371,7 +385,8 @@ async def breach_news(
         s = source.lower()
         rows = [r for r in rows if s in r["source"].lower()]
     return {"count": len(rows), "since_days": since_days, "sector": sector,
-            "disclosures": rows[:limit],
+            "returned": min(len(rows), limit),
+            "disclosures": [_slim(r) for r in rows[:limit]],
             "note": "Disclosure metadata only. No leaked records are served by this tool."}
 
 
@@ -406,7 +421,7 @@ async def check_exposure(
         "total_accounts_exposed": sum(h["pwn_count"] for h in hits),
         "exposed_data_types": sorted({t for h in hits for t in h["exposed_data_types"]}),
         "latest_disclosure": hits[0]["sort_date"] if hits else None,
-        "matches": hits[:15],
+        "matches": [_slim(h) for h in hits[:8]],
         "note": ("Presence signal from public disclosure feeds: reports THAT an entity "
                  "appears in breach data, not the breached data. Confirm before acting."),
     }
@@ -471,7 +486,8 @@ async def breach_history(
         "total_accounts_exposed": sum(r["pwn_count"] for r in rows),
         "span": {"earliest": min(years), "latest": max(years)} if years else None,
         "order": order,
-        "incidents": rows[:limit],
+        "returned": min(len(rows), limit),
+        "incidents": [_slim(r) for r in rows[:limit]],
         "note": "Full-archive disclosure metadata only. No leaked records are served.",
     }
 
@@ -524,7 +540,7 @@ async def breach_timeline(
         "worst_threat_level": worst if hits else "none",
         "total_accounts_exposed": sum(h["pwn_count"] for h in hits),
         "sources": sorted({h["source"] for h in hits}),
-        "timeline": hits[:30],
+        "timeline": [_slim(h) for h in hits[:12]],
         "assessment": stance,
         "note": "Chronology of public disclosures only. No leaked records are served.",
     }
