@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "io.github.beepboop2025/data-breach-detector",
   "title": "data-breach-detector",
-  "description": "Read-only breach intelligence from public feeds, full history 2007-today: reports THAT an organization was breached, never the data.",
+  "description": "Read-only breach intel, full history 2007-today: reports THAT an org was breached, never the data.",
   "version": "0.2.0",
   "repository": {
     "url": "https://github.com/beepboop2025/data-breach-detector",
