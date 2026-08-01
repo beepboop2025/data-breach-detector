@@ -3,7 +3,7 @@
   "name": "io.github.beepboop2025/data-breach-detector",
   "title": "data-breach-detector",
   "description": "Read-only breach intel, full history 2007-today: reports THAT an org was breached, never the data.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "repository": {
     "url": "https://github.com/beepboop2025/data-breach-detector",
     "source": "github"
@@ -12,7 +12,7 @@
     {
       "registryType": "pypi",
       "identifier": "data-breach-detector",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "transport": {
         "type": "stdio"
       }

@@ -145,6 +145,16 @@ def test_list_payloads_are_slimmed():
     assert hist["returned"] == min(hist["count"], 5)
 
 
+def test_default_pages_stay_small_enough_for_a_tool_loop():
+    """A 25-row default serialized to ~14KB and stalled an agent's tool loop."""
+    import json
+    for payload in (run(S.breach_news(since_days=100000)),
+                    run(S.breach_history()),
+                    run(S.breach_timeline("acme.example")),
+                    run(S.check_exposure("acme.example"))):
+        assert len(json.dumps(payload)) < 8000
+
+
 def test_timeline_repeat_victim_judgment():
     out = run(S.breach_timeline("acme.example"))
     assert out["repeat_victim"] is True

@@ -365,8 +365,9 @@ async def breach_news(
         description="optional source filter: 'HaveIBeenPwned', 'RansomLook', "
                     "'ransomwatch-archive' or 'SEC EDGAR 8-K 1.05'")] = None,
     limit: Annotated[int, Field(
-        description="maximum disclosures to return (default 25)",
-        ge=1, le=100)] = 25,
+        description="maximum disclosures to return (default 10; raise it "
+                    "deliberately, large pages are heavy for an agent loop)",
+        ge=1, le=100)] = 10,
 ) -> dict:
     """Read recent breach and ransomware DISCLOSURES from public threat-intel
     feeds (HaveIBeenPwned, the RansomLook live leak-site tracker and SEC 8-K
@@ -448,7 +449,9 @@ async def breach_history(
     order: Annotated[str, Field(
         description="'newest' (default), 'oldest' or 'largest' (by accounts exposed)")] = "newest",
     limit: Annotated[int, Field(
-        description="maximum incidents to return (default 25)", ge=1, le=100)] = 25,
+        description="maximum incidents to return (default 10; raise it "
+                    "deliberately, large pages are heavy for an agent loop)",
+        ge=1, le=100)] = 10,
 ) -> dict:
     """Search the FULL historical breach archive — every incident this server
     knows about, back to 2007: HaveIBeenPwned's verified breach directory, the
