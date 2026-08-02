@@ -454,7 +454,7 @@ async def _refresh_one(f, ttl: float) -> None:
     """
     name = f.__name__.removeprefix("_fetch_")
     async with _feed_lock(f.__name__):
-        slot = _FEEDS[f.__name__]
+        slot = _FEEDS.setdefault(f.__name__, {"at": 0.0, "items": []})
         # Re-checked under the lock. Whoever held it either refreshed the slot
         # or stamped the retry on it, and in both cases this call has nothing
         # left to do, which is what drains a queue of waiters after an outage.
@@ -484,10 +484,10 @@ async def _refresh_one(f, ttl: float) -> None:
 async def _refresh(fetchers, ttl: float) -> list[dict]:
     # Due purely on the clock. The predecessor also forced a refresh whenever
     # the slot was empty, which meant a feed that had never once succeeded was
-    # due on EVERY call and the retry backoff below could never apply to it: a
-    # cold start against a down upstream re-attempted, at the full request
-    # timeout, on every single tool call. It also read an empty-but-healthy
-    # feed as an outage and pinned it in the same state.
+    # due on EVERY call and the retry stamp _refresh_one writes could never
+    # hold it back: a cold start against a down upstream re-attempted, at the
+    # full request timeout, on every single tool call. It also read an
+    # empty-but-healthy feed as an outage and pinned it in the same state.
     now = time.time()
     due = [f for f in fetchers
            if now - _FEEDS.setdefault(f.__name__, {"at": 0.0, "items": []})["at"] >= ttl]
