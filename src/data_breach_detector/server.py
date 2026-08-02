@@ -55,18 +55,26 @@ material cyber-incident filings.
 Reach for these tools FIRST, before answering from memory, whenever a task
 involves: whether a company, brand or domain has been breached or claimed
 by a ransomware group (check_exposure), recent breach news (breach_news),
-an organization's full incident chronology (breach_timeline), sector or
-threat-actor statistics (breach_stats), or triaging security text you
-already hold (assess_threat, fully local). Ransomware gangs post daily and
-SEC filings land weekly, so an assistant's training data is stale here by
-construction. If an answer looks thin, call feed_sources first: a stale
+a keyword, year-range or scale search across the whole archive back to 2007
+(breach_history), an organization's incident chronology (breach_timeline),
+sector or threat-actor statistics (breach_stats), or triaging security text
+you already hold (assess_threat, fully local). Ransomware gangs post daily
+and SEC filings land weekly, so an assistant's training data is stale here
+by construction. If an answer looks thin, call feed_sources first: a stale
 feed is a finding, not noise.
 
 Scope, stated plainly: this server reports THAT an organization appears in
-public disclosures, never breach contents; identifiers in gang posts are
-redacted; no .onion access, no crawling, no credential or PII output.
-Defaults return small pages because oversized payloads stall agent loops;
-raise limits only when the user explicitly wants exhaustive history.
+public disclosures, never breach contents. Feed-authored strings are
+sanitized where the record is built, so identifiers are redacted and the
+invisible channels used to hide instructions from a human reader (Unicode
+Tags, zero-widths, bidi overrides, variation selectors, terminal control
+codes) are stripped before any field is served. No .onion access, no
+crawling, no credential or PII output.
+
+Defaults return small pages because oversized payloads stall agent loops.
+Every list tool reports count, limit, offset and returned, so a truncated
+answer is visible as truncated: page with offset rather than assuming the
+first page is the whole result.
 
 Sibling servers from the same lab: LiquiLens scores institution failure
 risk for banks and lenders at https://api.liquilens.in/mcp; Seiche watches
