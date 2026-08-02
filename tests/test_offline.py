@@ -229,6 +229,68 @@ def test_news_source_filter():
     assert out["disclosures"][0]["source"] == "SEC EDGAR 8-K 1.05"
 
 
+# --- paging and truncation disclosure ------------------------------------
+
+def _many(entity: str, n: int) -> list[dict]:
+    """n incidents for one entity, one per year from 2007."""
+    return [_rec(id=f"hibp:{entity}-{i}", entity=entity,
+                 title=f"{entity} incident {i}", summary=f"{entity} named in {i}.",
+                 disclosed_at=f"{2006 + i}-01-01T00:00:00+00:00",
+                 sort_date=f"{2006 + i}-01-01T00:00:00Z")
+            for i in range(1, n + 1)]
+
+
+def test_timeline_window_is_the_recent_end_not_the_oldest_twelve():
+    """An org with 20 incidents used to get the twelve OLDEST and nothing recent.
+
+    The same payload advertised a latest_incident that was not in the list, and
+    nothing in the schema or the response said a cap had been applied.
+    """
+    S._FEEDS["_fetch_hibp"]["items"] = _many("paged.example", 20)
+    out = run(S.breach_timeline("paged.example"))
+    assert out["incidents"] == 20 and out["returned"] == 12
+    assert out["timeline"][-1]["disclosed_at"] == out["latest_incident"]
+    assert out["timeline"][0]["disclosed_at"] == "2015-01-01T00:00:00+00:00"
+    older = run(S.breach_timeline("paged.example", offset=12))
+    assert [r["id"] for r in older["timeline"]] == [
+        f"hibp:paged.example-{i}" for i in range(1, 9)]
+    # The judgment fields span every incident regardless of the window.
+    assert older["latest_incident"] == out["latest_incident"]
+    assert older["incidents"] == 20
+
+
+def test_offset_reaches_rows_past_the_first_page():
+    first = run(S.breach_history(limit=2))
+    second = run(S.breach_history(limit=2, offset=2))
+    assert first["count"] == second["count"] == len(CORPUS)
+    assert first["returned"] == 2 and second["returned"] == 2
+    assert second["offset"] == 2
+    ids = [r["id"] for r in first["incidents"] + second["incidents"]]
+    assert len(set(ids)) == 4
+    past_the_end = run(S.breach_history(offset=len(CORPUS)))
+    assert past_the_end["returned"] == 0 and past_the_end["incidents"] == []
+    news = run(S.breach_news(since_days=100000, limit=1, offset=1))
+    assert news["returned"] == 1 and news["offset"] == 1
+    assert news["disclosures"][0]["id"] != run(
+        S.breach_news(since_days=100000, limit=1))["disclosures"][0]["id"]
+
+
+def test_check_exposure_discloses_its_page():
+    S._FEEDS["_fetch_hibp"]["items"] = _many("paged.example", 20)
+    out = run(S.check_exposure("paged.example"))
+    assert out["mentions"] == 20 and out["limit"] == 8 and out["returned"] == 8
+    page2 = run(S.check_exposure("paged.example", limit=8, offset=8))
+    assert page2["returned"] == 8 and page2["mentions"] == 20
+    assert {m["id"] for m in out["matches"]}.isdisjoint(
+        {m["id"] for m in page2["matches"]})
+
+
+def test_stats_discloses_the_bucket_cap():
+    out = run(S.breach_stats(group_by="actor", limit=1))
+    assert out["buckets_total"] == 2 and out["buckets_returned"] == 1
+    assert len(out["buckets"]) == 1
+
+
 def test_feed_sources_flags_stale_live_feed():
     S._FEEDS["_fetch_ransomlook"]["items"] = [
         _rec(id="RansomLook:old:x", source="RansomLook", actor="old",

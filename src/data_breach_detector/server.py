@@ -508,6 +508,11 @@ async def breach_news(
         description="maximum disclosures to return (default 10; raise it "
                     "deliberately, large pages are heavy for an agent loop)",
         ge=1, le=100)] = 10,
+    offset: Annotated[int, Field(
+        description="how many matching disclosures to skip before the page "
+                    "starts; with limit this walks a result set larger than "
+                    "any single page (count reports the full total)",
+        ge=0)] = 0,
 ) -> dict:
     """Read recent breach and ransomware DISCLOSURES from public threat-intel
     feeds (HaveIBeenPwned, the RansomLook live leak-site tracker and SEC 8-K
@@ -525,9 +530,10 @@ async def breach_news(
     if source:
         s = source.lower()
         rows = [r for r in rows if s in r["source"].lower()]
+    page = rows[offset:offset + limit]
     return {"count": len(rows), "since_days": since_days, "sector": sector,
-            "returned": min(len(rows), limit),
-            "disclosures": [_slim(r) for r in rows[:limit]],
+            "limit": limit, "offset": offset, "returned": len(page),
+            "disclosures": [_slim(r) for r in page],
             "note": "Disclosure metadata only. No leaked records are served by this tool."}
 
 
@@ -540,6 +546,14 @@ async def check_exposure(
     since_days: Annotated[int, Field(
         description="optional look-back window in days; the default covers all history",
         ge=1)] = 100000,
+    limit: Annotated[int, Field(
+        description="maximum matching disclosures to return (default 8; the "
+                    "mention count and the aggregates always cover every match)",
+        ge=1, le=100)] = 8,
+    offset: Annotated[int, Field(
+        description="how many matches to skip before the page starts; with "
+                    "limit this reaches matches beyond the first page",
+        ge=0)] = 0,
 ) -> dict:
     """Answer whether a domain, company or brand appears in public breach or
     ransomware DISCLOSURES across ALL history (2007 → today): yes/no with
@@ -548,7 +562,9 @@ async def check_exposure(
     exposed records themselves. This is a triage signal built from disclosure
     feeds, not proof of compromise; confirm through authorized channels before
     acting. For the incident-by-incident chronology of one entity, use
-    breach_timeline; for a recent-news sweep, use breach_news."""
+    breach_timeline; for a recent-news sweep, use breach_news. mentions, the
+    aggregates and the data types always cover every match; matches carries one
+    page of them, sized by limit and walked with offset."""
     q = query.strip().lower()
     if not q:
         return {"error": "query is required (a domain, company or brand)"}
@@ -556,13 +572,15 @@ async def check_exposure(
     hits = [r for r in feed if _days_ago(r.get("sort_date")) <= since_days and q in (
         r["entity"] + " " + r["title"] + " " + r["summary"]).lower()]
     worst = max((h["threat_level"] for h in hits), key=_sev_rank, default="none")
+    page = hits[offset:offset + limit]
     return {
         "query": query, "exposed": bool(hits), "mentions": len(hits),
         "worst_threat_level": worst if hits else "none",
         "total_accounts_exposed": sum(h["pwn_count"] for h in hits),
         "exposed_data_types": sorted({t for h in hits for t in h["exposed_data_types"]}),
         "latest_disclosure": hits[0]["sort_date"] if hits else None,
-        "matches": [_slim(h) for h in hits[:8]],
+        "limit": limit, "offset": offset, "returned": len(page),
+        "matches": [_slim(h) for h in page],
         "note": ("Presence signal from public disclosure feeds: reports THAT an entity "
                  "appears in breach data, not the breached data. Confirm before acting."),
     }
@@ -592,6 +610,11 @@ async def breach_history(
         description="maximum incidents to return (default 10; raise it "
                     "deliberately, large pages are heavy for an agent loop)",
         ge=1, le=100)] = 10,
+    offset: Annotated[int, Field(
+        description="how many matching incidents to skip before the page "
+                    "starts; count can run to five figures over the ~16k-post "
+                    "archive, so this is how the tail is reached",
+        ge=0)] = 0,
 ) -> dict:
     """Search the FULL historical breach archive — every incident this server
     knows about, back to 2007: HaveIBeenPwned's verified breach directory, the
@@ -624,13 +647,14 @@ async def breach_history(
     elif order == "oldest":
         rows = sorted(rows, key=lambda r: r.get("disclosed_at") or r.get("sort_date", ""))
     years = [y for r in rows if (y := _year_of(r)) is not None]
+    page = rows[offset:offset + limit]
     return {
         "count": len(rows),
         "total_accounts_exposed": sum(r["pwn_count"] for r in rows),
         "span": {"earliest": min(years), "latest": max(years)} if years else None,
         "order": order,
-        "returned": min(len(rows), limit),
-        "incidents": [_slim(r) for r in rows[:limit]],
+        "limit": limit, "offset": offset, "returned": len(page),
+        "incidents": [_slim(r) for r in page],
         "note": "Full-archive disclosure metadata only. No leaked records are served.",
     }
 
@@ -642,12 +666,25 @@ async def breach_timeline(
     entity: Annotated[str, Field(
         description="domain, company or brand to build the chronology for, "
                     "e.g. 'yahoo.com' or 'Adobe'")],
+    limit: Annotated[int, Field(
+        description="how many incidents the timeline list carries (default 12); "
+                    "the counts, span and judgment always cover every incident",
+        ge=1, le=100)] = 12,
+    offset: Annotated[int, Field(
+        description="pages backwards through the chronology from the recent "
+                    "end: 0 gives the newest window, 12 gives the window "
+                    "before that",
+        ge=0)] = 0,
 ) -> dict:
-    """Build the complete incident-by-incident CHRONOLOGY of one organization
-    across every source and all history, oldest first, with judgment on top:
-    first and latest incident, incidents per year, whether the organization is
-    a repeat victim, worst threat level and total accounts ever exposed.
-    Repeat victimhood is a forward-looking risk signal — organizations named
+    """Build the incident-by-incident CHRONOLOGY of one organization across
+    every source and all history, with judgment on top: first and latest
+    incident, incidents per year, whether the organization is a repeat victim,
+    worst threat level and total accounts ever exposed. Those summary fields
+    cover EVERY incident on record. The timeline list carries a window of them,
+    oldest first within the window, defaulting to the most recent limit
+    incidents and paging backwards with offset, so an organization with a long
+    history shows its current state first rather than only its ancient one.
+    Repeat victimhood is a forward-looking risk signal: organizations named
     more than once have demonstrably not closed the gap. Metadata only; never
     the leaked data. For a yes/no presence check use check_exposure."""
     q = entity.strip().lower()
@@ -673,6 +710,12 @@ async def breach_timeline(
     else:
         stance = ("Single known disclosure. Review what data types were exposed "
                   "and whether they are still in circulation.")
+    # hits is oldest first, so a plain head slice served the twelve OLDEST rows
+    # and nothing recent, while latest_incident in the same payload advertised
+    # a date that was not in the list. The window is anchored at the recent end
+    # instead and offset walks it backwards.
+    end = max(len(hits) - offset, 0)
+    window = hits[max(end - limit, 0):end]
     return {
         "entity": entity,
         "incidents": len(hits),
@@ -683,7 +726,8 @@ async def breach_timeline(
         "worst_threat_level": worst if hits else "none",
         "total_accounts_exposed": sum(h["pwn_count"] for h in hits),
         "sources": sorted({h["source"] for h in hits}),
-        "timeline": [_slim(h) for h in hits[:12]],
+        "limit": limit, "offset": offset, "returned": len(window),
+        "timeline": [_slim(h) for h in window],
         "assessment": stance,
         "note": "Chronology of public disclosures only. No leaked records are served.",
     }
@@ -698,6 +742,11 @@ async def breach_stats(
                     "'threat_level' or 'actor' (ransomware group)")] = "year",
     sector: Annotated[str | None, Field(
         description="optional industry keyword filter applied before aggregating")] = None,
+    limit: Annotated[int, Field(
+        description="how many buckets to return, largest first (default 40); "
+                    "buckets_total reports how many exist, and grouping by "
+                    "actor over the ~16k-post archive produces far more",
+        ge=1, le=500)] = 40,
 ) -> dict:
     """Aggregate the full breach archive into analyst-grade statistics:
     incidents and accounts exposed per year, per source, per exposed data
@@ -737,11 +786,16 @@ async def breach_stats(
     if group_by == "year":
         ordered = sorted(buckets.items(), key=lambda kv: kv[0], reverse=True)
     largest = sorted(feed, key=lambda r: r["pwn_count"], reverse=True)[:5]
+    # Buckets have always been capped. Without buckets_total the cap was
+    # invisible: grouping by actor over the archive silently dropped the tail,
+    # and a caller summing the buckets could not reconcile with
+    # total_incidents and had no way to know why.
     return {
         "group_by": group_by, "sector": sector,
         "total_incidents": len(feed),
         "total_accounts_exposed": sum(r["pwn_count"] for r in feed),
-        "buckets": {k: v for k, v in ordered[:40]},
+        "buckets_total": len(buckets), "buckets_returned": min(len(buckets), limit),
+        "buckets": {k: v for k, v in ordered[:limit]},
         "largest_incidents": [
             {"entity": r["entity"], "title": r["title"], "pwn_count": r["pwn_count"],
              "disclosed_at": r["disclosed_at"], "source": r["source"]}
