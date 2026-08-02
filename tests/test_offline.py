@@ -416,6 +416,33 @@ def test_poisoned_sec_row_sanitized_end_to_end():
     assert rows[0]["disclosed_at"] == "2026-07-20T00:00:00+00:00"
 
 
+# --- version -------------------------------------------------------------
+
+def test_one_version_constant_reaches_every_surface():
+    """4648972 bumped pyproject and server.json and left __init__ on 0.2.2.
+
+    Three files cannot import each other (two are not Python), so nothing but
+    a test can hold them together. Read with a regex rather than tomllib,
+    which only exists from 3.11 and the floor here is 3.10.
+    """
+    import pathlib
+    import re as _re
+
+    from data_breach_detector import __version__
+    from data_breach_detector._version import SERVER_VERSION
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    pyproject = _re.search(r'(?m)^version = "([^"]+)"',
+                           (root / "pyproject.toml").read_text(encoding="utf-8"))
+    manifest = _re.findall(r'"version": "([^"]+)"',
+                           (root / "server.json").read_text(encoding="utf-8"))
+    assert __version__ == SERVER_VERSION
+    assert S.mcp._mcp_server.version == SERVER_VERSION
+    assert SERVER_VERSION in S._UA
+    assert pyproject and pyproject.group(1) == SERVER_VERSION
+    assert manifest and set(manifest) == {SERVER_VERSION}
+
+
 # --- resilience ---------------------------------------------------------
 
 def test_refresh_keeps_last_good_on_failure():

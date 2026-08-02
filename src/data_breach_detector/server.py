@@ -28,7 +28,6 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
-from importlib.metadata import PackageNotFoundError, version as _pkg_version
 
 from typing import Annotated
 
@@ -37,6 +36,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from ._version import SERVER_VERSION
 from .classifier import classify_threat
 
 # httpx logs full request URLs at INFO; when the HTTP transport is fronted by a
@@ -76,11 +76,6 @@ breach headline plus LiquiLens answers what a breach headline alone
 cannot: whether the victim can absorb it.
 """
 
-try:
-    _VERSION = _pkg_version("data-breach-detector")
-except PackageNotFoundError:  # running from a source tree
-    _VERSION = "0.3.0"
-
 mcp = FastMCP(
     "data-breach-detector",
     instructions=INSTRUCTIONS,
@@ -89,13 +84,13 @@ mcp = FastMCP(
 # FastMCP exposes no version parameter, so without this override the wire
 # serverInfo reports the mcp SDK's own version (1.28.1 shipped for weeks)
 # to every client and directory scanner. The low-level server carries it.
-mcp._mcp_server.version = _VERSION
+mcp._mcp_server.version = SERVER_VERSION
 
 HIBP_BREACHES = "https://haveibeenpwned.com/api/v3/breaches"
 RANSOMLOOK_RECENT = "https://www.ransomlook.io/api/recent"
 RANSOMWATCH_ARCHIVE = "https://raw.githubusercontent.com/joshhighet/ransomwatch/main/posts.json"
 SEC_FTS = "https://efts.sec.gov/LATEST/search-index"
-_UA = "data-breach-detector/0.2 (+defensive threat-intel; contact@seiche.info)"
+_UA = f"data-breach-detector/{SERVER_VERSION} (+defensive threat-intel; contact@seiche.info)"
 _SEVERITY = ["low", "medium", "high", "critical"]
 
 def _token_or_keep(m: re.Match) -> str:
