@@ -30,3 +30,10 @@ data-breach-detector = "data_breach_detector.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/data_breach_detector"]
+
+# Without this a plain "pytest -q" from the repo root dies at collection with
+# ModuleNotFoundError, so the suite only ran for whoever remembered to export
+# PYTHONPATH. A test nobody can run by accident is a test nobody runs.
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
