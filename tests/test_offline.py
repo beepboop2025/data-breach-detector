@@ -454,6 +454,64 @@ def test_refresh_keeps_last_good_on_failure():
     assert "boom" in S._LAST_ERRORS
 
 
+def test_empty_feed_backs_off_instead_of_refetching_every_call():
+    """A feed with nothing cached used to be due on EVERY call.
+
+    The due check was "not slot['items'] or expired", so a feed that had never
+    once succeeded could not reach the _RETRY_S backoff: a cold start against a
+    down upstream re-attempted, at the full request timeout, on every single
+    tool call. A legitimately empty feed was pinned in the same state.
+    """
+    calls = []
+
+    async def _fetch_empty(client):
+        calls.append(1)
+        return []
+
+    S._FEEDS.pop("_fetch_empty", None)
+    for _ in range(3):
+        run(S._refresh([_fetch_empty], ttl=S._LIVE_TTL_S))
+    assert len(calls) == 1
+    assert S._LAST_ERRORS["empty"] == "empty result"
+
+
+def test_single_flight_collapses_concurrent_fetches():
+    """N concurrent tool calls used to launch N concurrent fetches, including
+    the multi-MB archive."""
+    calls = []
+
+    async def _fetch_slow(client):
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return [_rec(id="slow", source="Slow")]
+
+    async def _three_at_once():
+        return await asyncio.gather(
+            *(S._refresh([_fetch_slow], ttl=S._LIVE_TTL_S) for _ in range(3)))
+
+    S._FEEDS.pop("_fetch_slow", None)
+    got = run(_three_at_once())
+    assert len(calls) == 1
+    assert all([r["id"] for r in rows] == ["slow"] for rows in got)
+
+
+def test_feed_answers_from_cache_when_a_refresh_blows_the_deadline(monkeypatch):
+    """One tool call could block for minutes waiting on the slowest upstream."""
+    async def _fetch_hang(client):
+        await asyncio.sleep(30)
+        return [_rec(id="too-late")]
+
+    S._FEEDS["_fetch_hang"] = {"at": 0.0, "items": [_rec(id="cached", source="Hang")]}
+    monkeypatch.setattr(S, "_LIVE_FETCHERS", [_fetch_hang])
+    monkeypatch.setattr(S, "_ARCHIVE_FETCHERS", [])
+    monkeypatch.setattr(S, "_FEED_DEADLINE_S", 0.05)
+    started = time.monotonic()
+    rows = run(S._feed())
+    assert time.monotonic() - started < 5
+    assert [r["id"] for r in rows] == ["cached"]
+    assert "refresh-deadline" in S._LAST_ERRORS
+
+
 def test_partial_failure_never_drops_sibling_feed():
     async def _fetch_good(client):
         return [_rec(id="fresh-row", source="GoodFeed")]

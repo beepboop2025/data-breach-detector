@@ -90,6 +90,7 @@ HIBP_BREACHES = "https://haveibeenpwned.com/api/v3/breaches"
 RANSOMLOOK_RECENT = "https://www.ransomlook.io/api/recent"
 RANSOMWATCH_ARCHIVE = "https://raw.githubusercontent.com/joshhighet/ransomwatch/main/posts.json"
 SEC_FTS = "https://efts.sec.gov/LATEST/search-index"
+_SEC_BUDGET_S = 60
 _UA = f"data-breach-detector/{SERVER_VERSION} (+defensive threat-intel; contact@seiche.info)"
 _SEVERITY = ["low", "medium", "high", "critical"]
 
@@ -318,9 +319,16 @@ async def _fetch_sec_incidents(client: httpx.AsyncClient) -> list[dict]:
     EDGAR full-text search pages 10 hits at a time with no date sort, so page
     until every hit for the query is in hand (the population is small; a
     truncation note is surfaced by feed_sources if it ever outgrows the cap).
+
+    Ten sequential requests at the request timeout is minutes of wall clock in
+    the worst case, so the pager also stops on a budget and lets feed_sources
+    report the partial coverage it already reports for the page cap.
     """
     out, seen, total = [], set(), None
+    budget_ends = time.monotonic() + _SEC_BUDGET_S
     for offset in range(0, 100, 10):
+        if time.monotonic() > budget_ends:
+            break
         r = await client.get(SEC_FTS, params={
             "q": '"Item 1.05"', "forms": "8-K", "from": offset})
         r.raise_for_status()
@@ -373,15 +381,40 @@ async def _fetch_sec_incidents(client: httpx.AsyncClient) -> list[dict]:
 
 
 _SEC_STATE: dict = {"total": 0, "fetched": 0}
-# Per-feed cache: fetcher __name__ -> {"at": last good fetch, "items": [...]}.
+# Per-feed cache: fetcher __name__ -> {"at": last attempt, "items": [...]}.
 # Feeds refresh independently so one failing source can never drop another's
 # rows; a failed feed keeps its last good items and retries after _RETRY_S.
+# "at" stamps the last ATTEMPT, not the last success, which is what makes the
+# retry backoff reachable for a feed that has never returned anything.
 _FEEDS: dict[str, dict] = {}
 _LIVE_TTL_S = 900
 _ARCHIVE_TTL_S = 21600
 _RETRY_S = 300
+_HTTP_TIMEOUT_S = 20
+# Ceiling on how long one tool call may spend refreshing. Past it the call is
+# answered from cache and the fetch is left running, so the work is not thrown
+# away and the next call picks up its result.
+_FEED_DEADLINE_S = 25
 _LAST_ERRORS: dict[str, str] = {}
+_FEED_LOCKS: dict[str, tuple] = {}
+_INFLIGHT: set = set()
 _log = logging.getLogger("data_breach_detector")
+
+
+def _feed_lock(name: str) -> asyncio.Lock:
+    """One in-flight fetch per feed, so N concurrent tool calls are not N fetches.
+
+    Keyed by the running loop as well as the name: an asyncio.Lock binds to the
+    loop that first awaits it and refuses another, while this module is
+    imported once and may be driven by more than one loop over its life (a host
+    that restarts its loop, or a test calling asyncio.run repeatedly).
+    """
+    loop = asyncio.get_running_loop()
+    bound = _FEED_LOCKS.get(name)
+    if bound is None or bound[0] is not loop:
+        bound = (loop, asyncio.Lock())
+        _FEED_LOCKS[name] = bound
+    return bound[1]
 
 
 def _dedup(records: list[dict]) -> list[dict]:
@@ -403,31 +436,55 @@ def _dedup(records: list[dict]) -> list[dict]:
     return out
 
 
+async def _refresh_one(f, ttl: float) -> None:
+    """Refresh one feed, at most one fetch at a time.
+
+    The client is built inside the lock rather than shared across the due
+    feeds: a call that queues here can outlive the call that queued ahead of
+    it, and a client closed by that earlier call's context manager would be
+    unusable by the time this one ran.
+    """
+    name = f.__name__.removeprefix("_fetch_")
+    async with _feed_lock(f.__name__):
+        slot = _FEEDS[f.__name__]
+        # Re-checked under the lock. Whoever held it either refreshed the slot
+        # or stamped the retry on it, and in both cases this call has nothing
+        # left to do, which is what drains a queue of waiters after an outage.
+        if time.time() - slot["at"] < ttl:
+            return
+        res: object
+        try:
+            async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S,
+                                         headers={"User-Agent": _UA},
+                                         follow_redirects=True) as client:
+                res = await f(client)
+        except Exception as exc:
+            res = exc
+        now = time.time()
+        if isinstance(res, list) and res:
+            slot.update(at=now, items=res)
+            _LAST_ERRORS.pop(name, None)
+        else:
+            # A down feed must be a served fact, never a silent hole:
+            # keep the last good items, record the error, retry soon.
+            _LAST_ERRORS[name] = ("empty result" if isinstance(res, list)
+                                  else f"{type(res).__name__}: {res}")
+            _log.warning("feed %s failed: %s", name, _LAST_ERRORS[name])
+            slot["at"] = now - ttl + _RETRY_S
+
+
 async def _refresh(fetchers, ttl: float) -> list[dict]:
+    # Due purely on the clock. The predecessor also forced a refresh whenever
+    # the slot was empty, which meant a feed that had never once succeeded was
+    # due on EVERY call and the retry backoff below could never apply to it: a
+    # cold start against a down upstream re-attempted, at the full request
+    # timeout, on every single tool call. It also read an empty-but-healthy
+    # feed as an outage and pinned it in the same state.
     now = time.time()
-    due = []
-    for f in fetchers:
-        slot = _FEEDS.setdefault(f.__name__, {"at": 0.0, "items": []})
-        if not slot["items"] or now - slot["at"] >= ttl:
-            due.append(f)
+    due = [f for f in fetchers
+           if now - _FEEDS.setdefault(f.__name__, {"at": 0.0, "items": []})["at"] >= ttl]
     if due:
-        async with httpx.AsyncClient(timeout=40, headers={"User-Agent": _UA},
-                                     follow_redirects=True) as client:
-            results = await asyncio.gather(*(f(client) for f in due),
-                                           return_exceptions=True)
-        for f, res in zip(due, results):
-            name = f.__name__.removeprefix("_fetch_")
-            slot = _FEEDS[f.__name__]
-            if isinstance(res, list) and res:
-                slot.update(at=now, items=res)
-                _LAST_ERRORS.pop(name, None)
-            else:
-                # A down feed must be a served fact, never a silent hole:
-                # keep the last good items, record the error, retry soon.
-                _LAST_ERRORS[name] = ("empty result" if isinstance(res, list)
-                                      else f"{type(res).__name__}: {res}")
-                _log.warning("feed %s failed: %s", name, _LAST_ERRORS[name])
-                slot["at"] = now - ttl + _RETRY_S
+        await asyncio.gather(*(_refresh_one(f, ttl) for f in due))
     return [r for f in fetchers for r in _FEEDS[f.__name__]["items"]]
 
 
@@ -436,11 +493,33 @@ _ARCHIVE_FETCHERS = [_fetch_ransomwatch_archive, _fetch_sec_incidents]
 
 
 async def _feed() -> list[dict]:
-    live, archive = await asyncio.gather(
+    # Every tool call goes through here, so every tool call inherits whatever
+    # the slowest upstream is doing. SEC alone can page ten sequential requests,
+    # which is minutes at the request timeout, awaited by a caller with no
+    # deadline of its own. Past _FEED_DEADLINE_S the call is answered from
+    # cache. The refresh is shielded rather than cancelled: cancelling would
+    # discard the work and guarantee the next call starts over, whereas leaving
+    # it running means the next call finds the result waiting (and meanwhile
+    # the per-feed lock keeps that next call from starting a second fetch).
+    task = asyncio.ensure_future(asyncio.gather(
         _refresh(_LIVE_FETCHERS, _LIVE_TTL_S),
         _refresh(_ARCHIVE_FETCHERS, _ARCHIVE_TTL_S),
-    )
-    merged = _dedup(list(live) + list(archive))
+    ))
+    # The loop keeps only a weak reference to a running task, and this one is
+    # meant to outlive the await below, so hold it here until it finishes.
+    _INFLIGHT.add(task)
+    task.add_done_callback(_INFLIGHT.discard)
+    try:
+        await asyncio.wait_for(asyncio.shield(task), _FEED_DEADLINE_S)
+        _LAST_ERRORS.pop("refresh-deadline", None)
+    except asyncio.TimeoutError:
+        _LAST_ERRORS["refresh-deadline"] = (
+            f"refresh still running after {_FEED_DEADLINE_S}s; "
+            "this answer came from cache")
+        _log.warning("refresh exceeded %ss; answering from cache", _FEED_DEADLINE_S)
+    rows = [r for f in _LIVE_FETCHERS + _ARCHIVE_FETCHERS
+            for r in _FEEDS.get(f.__name__, {}).get("items", [])]
+    merged = _dedup(rows)
     merged.sort(key=lambda r: r.get("sort_date", ""), reverse=True)
     return merged
 
