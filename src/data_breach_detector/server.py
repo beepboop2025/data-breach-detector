@@ -98,27 +98,58 @@ SEC_FTS = "https://efts.sec.gov/LATEST/search-index"
 _UA = "data-breach-detector/0.2 (+defensive threat-intel; contact@seiche.info)"
 _SEVERITY = ["low", "medium", "high", "critical"]
 
+def _token_or_keep(m: re.Match) -> str:
+    """Redact a long alphanumeric run only when it cannot be prose.
+
+    A flat 24-character rule turned "ransomware-as-a-service-affiliate" into
+    "[token]", because the class spans hyphens and underscores and English
+    reaches that length by joining words. Base64 punctuation settles it
+    outright; otherwise demand one unbroken 24-character alphanumeric run,
+    which a key or a blob has and a hyphenated phrase does not.
+    """
+    run = m.group(0)
+    if any(c in "+/=" for c in run):
+        return "[token]"
+    if max(len(seg) for seg in re.split(r"[-_]", run)) >= 24:
+        return "[token]"
+    return run
+
+
 _REDACTIONS = [
     (re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"), "[email]"),
     (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "[ip]"),
     (re.compile(r"\b[a-fA-F0-9]{32,64}\b"), "[hash]"),
     (re.compile(r"\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b"), "[btc]"),
     (re.compile(r"\b0x[a-fA-F0-9]{40}\b"), "[eth]"),
-    (re.compile(r"\S+:\S{4,}"), "[credential]"),
-    (re.compile(r"\b[A-Za-z0-9+/=_-]{24,}\b"), "[token]"),
+    # "name:secret", no whitespace either side. The predecessor was \S+:\S{4,},
+    # which also ate every URL in a summary (a source link came back as
+    # "[credential]") and any ratio such as "3:1000". So: the name must start
+    # with a letter, must not be a URL scheme, and the secret must be six
+    # characters of non-delimiter.
+    (re.compile(r"(?<![\w.-])(?!(?:https?|ftps?|s3|git|ssh|file|mailto|data|urn)\b)"
+                r"[A-Za-z][\w.+-]{2,}:(?!//)[^\s:@/\\]{6,}(?![\w.-])"), "[credential]"),
+    # No \b here: Python's word boundary sees none between a CJK character and
+    # ASCII, so a blob prefixed with one survived the old \b...\b rule intact.
+    # Explicit lookarounds over the token alphabet have no such blind spot.
+    (re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{24,}(?![A-Za-z0-9+/=_-])"),
+     _token_or_keep),
 ]
 
 
 # Invisible characters carry no intelligence value and are the channel used to
-# hide instructions from a human reviewer: zero-widths, bidi overrides, and the
-# Unicode Tags block, which encodes plain ASCII that renders as nothing at all.
+# hide instructions from a human reviewer: zero-widths, bidi overrides, the
+# Unicode Tags block (plain ASCII that renders as nothing at all), variation
+# selectors, Hangul fillers and raw C0/C1 terminal controls such as ESC.
 # Every title and summary below is authored by a ransomware crew, and our
 # readers are increasingly agents, so a leak-site post is a path for injecting
 # instructions into whatever agent called these tools. Redaction handles PII;
 # this handles instructions. Both run on the same choke point.
 _INVISIBLE = re.compile(
-    r"[­​-‏‪-‮⁠-⁤⁦-⁩"
-    r"︀-️﻿\U000e0000-\U000e007f]"
+    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f"  # C0/C1 controls (tab, LF and CR fall to the whitespace collapse)
+    r"\u00ad\u061c\u115f\u1160\u180e"  # soft hyphen, Arabic letter mark, Hangul/Mongolian fillers
+    r"\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069"  # zero-widths, bidi controls
+    r"\u3164\ufe00-\ufe0f\ufeff\uffa0"  # Hangul filler, variation selectors 1-16, BOM, halfwidth filler
+    r"\U000e0000-\U000e007f\U000e0100-\U000e01ef]"  # Tags block, variation selectors 17-256
 )
 
 
@@ -131,6 +162,40 @@ def _redact(text: str, cap: int = 320) -> str:
     out = re.sub(r"<[^>]+>", " ", out)
     out = re.sub(r"\s+", " ", out).strip()
     return out[:cap]
+
+
+_DATE_CHARS = re.compile(r"^[0-9T:.+\- ]{4,40}Z?$")
+
+
+def _safe_date(value: str | None) -> str:
+    """Serve a feed-supplied date only if it is one.
+
+    Dates cannot ride through _redact (their colons are credential-shaped), so
+    this field family is validated instead. The character whitelist runs first
+    and does the security work: fromisoformat grew steadily more permissive
+    across 3.11 and 3.12, so what it accepts is not a stable guarantee, whereas
+    a string made only of digits and date punctuation cannot carry a control
+    code or a Tags-block payload on any interpreter. Anything else serves "".
+    """
+    if not value or not isinstance(value, str):
+        return ""
+    if not _DATE_CHARS.match(value):
+        return ""
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    return value
+
+
+def _safe_url(url: str | None, cap: int = 300) -> str:
+    """Feed-supplied URLs: strip invisibles, require http(s), cap the length."""
+    if not isinstance(url, str):
+        return ""
+    u = _INVISIBLE.sub("", url.strip())
+    if not u.startswith(("http://", "https://")) or re.search(r"\s", u):
+        return ""
+    return u[:cap]
 
 
 def _sev_rank(level: str) -> int:
@@ -157,7 +222,13 @@ def _entity_domain(text: str) -> str | None:
 
 def _ransom_record(group: str, title: str, discovered: str, summary: str,
                    source: str, source_url: str, classify: bool) -> dict:
-    entity = _entity_domain(summary) or _redact(title, 120)
+    # Gang-authored strings are sanitized BEFORE any field is assembled, so
+    # sibling fields (id, actor, entity, sort_date) can never ship the raw
+    # bytes that the title/summary fields already redact.
+    group = _redact(group, 60)
+    title = _redact(title, 140)
+    discovered = _safe_date(discovered)
+    entity = _entity_domain(summary) or title[:120]
     cats = ["ransomware"]
     if classify:
         cls = classify_threat(f"ransomware leak site {group} {title} {summary[:200]}")
@@ -171,7 +242,7 @@ def _ransom_record(group: str, title: str, discovered: str, summary: str,
         "source": source,
         "source_url": source_url,
         "disclosed_at": iso,
-        "sort_date": discovered or "",
+        "sort_date": discovered,
         "pwn_count": 0,
         "exposed_data_types": [],
         "categories": cats,
@@ -187,20 +258,27 @@ async def _fetch_hibp(client: httpx.AsyncClient) -> list[dict]:
     r.raise_for_status()
     out = []
     for b in r.json():
-        data_types = b.get("DataClasses", []) or []
+        # Same discipline as _ransom_record: every feed-authored string is
+        # redacted before it lands in a served field (id and entity included,
+        # and each data type, because those become breach_stats bucket keys).
+        name = _redact(b.get("Name") or "", 80)
+        domain = _redact(b.get("Domain") or "", 80)
+        data_types = [_redact(d, 60) for d in (b.get("DataClasses") or []) if d]
+        bdate = _safe_date(b.get("BreachDate"))
         cls = classify_threat(f"{b.get('Title','')} {b.get('Description','')} {' '.join(data_types)}")
         base = cls["threat_level"]
         if any("password" in d.lower() or "credential" in d.lower() for d in data_types):
             base = "critical" if b.get("IsStealerLog") else "high"
         out.append({
-            "id": f"hibp:{b.get('Name')}",
-            "entity": b.get("Domain") or b.get("Name"),
-            "title": _redact(b.get("Title") or b.get("Name"), 120),
+            "id": f"hibp:{name}",
+            "entity": domain or name,
+            "title": _redact(b.get("Title") or b.get("Name") or "", 120),
             "summary": _redact(b.get("Description", "")),
             "source": "HaveIBeenPwned",
-            "source_url": b.get("DisclosureUrl") or f"https://haveibeenpwned.com/PwnedWebsites#{b.get('Name')}",
-            "disclosed_at": (b.get("BreachDate") or "") + ("T00:00:00+00:00" if b.get("BreachDate") else ""),
-            "sort_date": b.get("AddedDate") or b.get("BreachDate", ""),
+            "source_url": (_safe_url(b.get("DisclosureUrl"))
+                           or f"https://haveibeenpwned.com/PwnedWebsites#{name}"),
+            "disclosed_at": bdate + ("T00:00:00+00:00" if bdate else ""),
+            "sort_date": _safe_date(b.get("AddedDate")) or bdate,
             "pwn_count": b.get("PwnCount", 0),
             "exposed_data_types": data_types,
             "categories": list(cls["categories"].keys()) or ["data_breach"],
@@ -261,15 +339,17 @@ async def _fetch_sec_incidents(client: httpx.AsyncClient) -> list[dict]:
             src = h.get("_source", {})
             if "1.05" not in (src.get("items") or []):
                 continue
-            adsh = src.get("adsh", "")
+            # Same discipline as _ransom_record: feed strings are redacted
+            # (dates validated, URLs scheme-checked) before serving.
+            adsh = _redact(src.get("adsh", ""), 40)
             if not adsh or adsh in seen:
                 continue
             seen.add(adsh)
             name = (src.get("display_names") or ["?"])[0]
-            name = re.sub(r"\s*\(CIK \d+\)\s*$", "", name).strip()
+            name = _redact(re.sub(r"\s*\(CIK \d+\)\s*$", "", name).strip(), 120)
             cik = (src.get("ciks") or ["0"])[0].lstrip("0") or "0"
             doc = h.get("_id", "").split(":", 1)[-1]
-            fdate = src.get("file_date", "")
+            fdate = _safe_date(src.get("file_date", ""))
             out.append({
                 "id": f"sec:{adsh}",
                 "entity": name,
@@ -278,8 +358,9 @@ async def _fetch_sec_incidents(client: httpx.AsyncClient) -> list[dict]:
                     f"{name} filed a Form {src.get('form','8-K')} disclosing a material "
                     f"cybersecurity incident under Item 1.05 on {fdate}."),
                 "source": "SEC EDGAR 8-K 1.05",
-                "source_url": f"https://www.sec.gov/Archives/edgar/data/{cik}/"
-                              f"{adsh.replace('-', '')}/{doc}",
+                "source_url": _safe_url(
+                    f"https://www.sec.gov/Archives/edgar/data/{cik}/"
+                    f"{adsh.replace('-', '')}/{doc}"),
                 "disclosed_at": fdate + ("T00:00:00+00:00" if fdate else ""),
                 "sort_date": fdate,
                 "pwn_count": 0,
