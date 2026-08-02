@@ -36,10 +36,16 @@ This server takes a fourth position:
    of 2013, an organization's full incident chronology, repeat-victim
    flagging, per-year and per-actor aggregates.
 3. **The ethical boundary is in the code, not the terms of service.** No
-   fetch/crawl/proxy primitives, no `.onion` access, and a redaction pass
-   strips emails, hashes, IPs, crypto addresses and credential-shaped tokens
-   from every string served. That makes it the breach feed you can safely
-   hand to an autonomous agent.
+   fetch/crawl/proxy primitives, no `.onion` access, and every feed-authored
+   string is sanitized *where the record is built*, before any field is
+   assembled from it: emails, hashes, IPs, crypto addresses and
+   credential-shaped tokens are redacted, and the invisible channels used to
+   hide instructions from a human reader (Unicode Tags, zero-widths, bidi
+   overrides, variation selectors, terminal control codes) are stripped. That
+   matters because leak-site titles are written by ransomware crews and read
+   by agents: the same field is both intelligence and an injection surface.
+   Redacting only the two fields a human looks at is not enough, because ids,
+   actor names and statistic bucket keys are built from the same strings.
 4. **Honesty is instrumented.** `feed_sources` reports each feed's newest
    item, a staleness flag and the last fetch error — a dead upstream is a
    served fact, not a silent hole. (The ransomwatch project itself froze in
@@ -51,9 +57,10 @@ This server takes a fourth position:
 
 - No arbitrary URL fetch, no crawl, no proxy — no general scraping primitives.
 - No `.onion` marketplace access, no transactions.
-- Never returns the raw text of a dump, paste or leak. A redaction layer strips
-  emails, hashes, IPs, crypto addresses and credential-shaped tokens from every
-  string returned.
+- Never returns the raw text of a dump, paste or leak. Feed-authored strings are
+  redacted and stripped of hidden-instruction characters at the point each
+  record is constructed, so ids, actor names, entity names, dates, source URLs
+  and aggregation keys are built from sanitized values rather than raw ones.
 
 ## Sources (public, no key)
 
@@ -69,13 +76,17 @@ This server takes a fourth position:
 
 | tool | what it returns |
 |------|-----------------|
-| `breach_news(since_days, sector, source, limit)` | recent disclosures — entity, date, scale, exposed data types, severity |
-| `check_exposure(query)` | does a domain/company appear anywhere in breach data — yes/no + metadata |
-| `breach_history(query, year_from, year_to, sector, data_type, min_accounts, order, limit)` | search the full archive back to 2007 |
-| `breach_timeline(entity)` | one organization's incident-by-incident chronology + repeat-victim assessment |
-| `breach_stats(group_by, sector)` | aggregates per year / source / data type / threat level / ransomware actor |
+| `breach_news(since_days, sector, source, limit, offset)` | recent disclosures — entity, date, scale, exposed data types, severity |
+| `check_exposure(query, since_days, limit, offset)` | does a domain/company appear anywhere in breach data — yes/no + metadata |
+| `breach_history(query, year_from, year_to, sector, data_type, min_accounts, order, limit, offset)` | search the full archive back to 2007 |
+| `breach_timeline(entity, limit, offset)` | one organization's incident-by-incident chronology + repeat-victim assessment |
+| `breach_stats(group_by, sector, limit)` | aggregates per year / source / data type / threat level / ransomware actor |
 | `assess_threat(text)` | classify a piece of security text — level, categories, action (no network) |
 | `feed_sources()` | feeds, per-source freshness, staleness flags, last fetch errors |
+
+Every list tool reports `count`, `limit`, `offset` and `returned`, and
+`breach_stats` reports `buckets_total`, so a truncated answer is visible as
+truncated and the tail is reachable by paging rather than lost.
 
 ## Run
 
