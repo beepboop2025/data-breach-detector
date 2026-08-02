@@ -109,10 +109,23 @@ _REDACTIONS = [
 ]
 
 
+# Invisible characters carry no intelligence value and are the channel used to
+# hide instructions from a human reviewer: zero-widths, bidi overrides, and the
+# Unicode Tags block, which encodes plain ASCII that renders as nothing at all.
+# Every title and summary below is authored by a ransomware crew, and our
+# readers are increasingly agents, so a leak-site post is a path for injecting
+# instructions into whatever agent called these tools. Redaction handles PII;
+# this handles instructions. Both run on the same choke point.
+_INVISIBLE = re.compile(
+    r"[­​-‏‪-‮⁠-⁤⁦-⁩"
+    r"︀-️﻿\U000e0000-\U000e007f]"
+)
+
+
 def _redact(text: str, cap: int = 320) -> str:
     if not text:
         return ""
-    out = text
+    out = _INVISIBLE.sub("", text)
     for pattern, repl in _REDACTIONS:
         out = pattern.sub(repl, out)
     out = re.sub(r"<[^>]+>", " ", out)
