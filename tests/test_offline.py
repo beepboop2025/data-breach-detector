@@ -524,3 +524,45 @@ def test_partial_failure_never_drops_sibling_feed():
     assert {r["id"] for r in got} == {"fresh-row", "old-but-kept"}
     out = run(S.feed_sources())
     assert out["fetch_errors"] and "bad" in out["fetch_errors"]
+
+
+def test_an_incomplete_answer_says_so_instead_of_reporting_zero(monkeypatch):
+    """A cold cache and a slow refresh produce an empty, confident answer.
+
+    The degradation used to be recorded only in _LAST_ERRORS, which only
+    feed_sources surfaces, so breach_news said "count: 0" with nothing to
+    distinguish "nobody was breached" from "we could not look".
+    """
+    import asyncio  # noqa: F401
+
+    monkeypatch.setattr(S, "_FEEDS", {}, raising=False)
+    monkeypatch.setattr(S, "_LAST_ERRORS",
+                        {"refresh-deadline": "refresh still running after 25s; "
+                                             "this answer came from cache"},
+                        raising=False)
+
+    async def _no_refresh():
+        return []
+
+    monkeypatch.setattr(S, "_feed", _no_refresh, raising=False)
+    out = asyncio.run(S.breach_news(since_days=7))
+    assert out["count"] == 0
+    gap = out.get("incomplete")
+    assert gap, "an answer built on no feeds must declare the gap"
+    assert gap["feeds_with_data"] == 0
+    assert "answered_from_cache" in gap
+    assert "incomplete" in gap["note"].lower()
+
+
+def test_a_complete_answer_carries_no_gap_block(monkeypatch):
+    """The disclosure must mean something, so it cannot always be present."""
+    import asyncio
+
+    monkeypatch.setattr(S, "_LAST_ERRORS", {}, raising=False)
+
+    async def _no_refresh():
+        return []
+
+    monkeypatch.setattr(S, "_feed", _no_refresh, raising=False)
+    out = asyncio.run(S.breach_news(since_days=7))
+    assert "incomplete" not in out

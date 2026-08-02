@@ -532,6 +532,35 @@ async def _feed() -> list[dict]:
     return merged
 
 
+def _coverage() -> dict | None:
+    """What this answer could not see, or None when it saw everything.
+
+    Every tool here answers from the merged feed cache, and the cache can be
+    short in two ways a caller cannot detect: a feed that failed, and a refresh
+    that outran the deadline so the answer came from whatever was already
+    resident. On a cold start both produce an empty, confident "no breaches
+    found". This turns that into a stated gap, which is the same rule the rest
+    of the fleet's boards follow: absence is disclosed, never served as calm.
+    """
+    if not _LAST_ERRORS:
+        return None
+    dead = _LAST_ERRORS.get("refresh-deadline")
+    feeds = {k: v for k, v in _LAST_ERRORS.items() if k != "refresh-deadline"}
+    live = sum(1 for f in _LIVE_FETCHERS + _ARCHIVE_FETCHERS
+               if _FEEDS.get(f.__name__, {}).get("items"))
+    total = len(_LIVE_FETCHERS) + len(_ARCHIVE_FETCHERS)
+    out: dict = {"feeds_with_data": live, "feeds_total": total}
+    if feeds:
+        out["failing_feeds"] = sorted(feeds)
+    if dead:
+        out["answered_from_cache"] = dead
+    out["note"] = ("This answer is incomplete: counts and absences below are "
+                   "bounded by the feeds that did report. Call feed_sources "
+                   "for per-feed detail." if live < total else
+                   "Some feeds reported errors; see feed_sources.")
+    return out
+
+
 def _days_ago(iso: str | None) -> float:
     if not iso:
         return 1e9
@@ -613,10 +642,14 @@ async def breach_news(
         s = source.lower()
         rows = [r for r in rows if s in r["source"].lower()]
     page = rows[offset:offset + limit]
-    return {"count": len(rows), "since_days": since_days, "sector": sector,
-            "limit": limit, "offset": offset, "returned": len(page),
-            "disclosures": [_slim(r) for r in page],
-            "note": "Disclosure metadata only. No leaked records are served by this tool."}
+    out = {"count": len(rows), "since_days": since_days, "sector": sector,
+           "limit": limit, "offset": offset, "returned": len(page),
+           "disclosures": [_slim(r) for r in page],
+           "note": "Disclosure metadata only. No leaked records are served by this tool."}
+    gap = _coverage()
+    if gap:
+        out["incomplete"] = gap
+    return out
 
 
 @mcp.tool(annotations=ToolAnnotations(
