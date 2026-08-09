@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 
-from .server import mcp
+from .server import enable_hosted_telemetry, mcp
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -22,6 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     if args.http:
+        enable_hosted_telemetry()
         mcp.settings.host = args.host
         mcp.settings.port = args.port
         mcp.run(transport="streamable-http")

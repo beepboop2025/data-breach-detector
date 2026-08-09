@@ -12,6 +12,7 @@ import time
 import pytest
 
 from data_breach_detector import server as S
+from data_breach_detector import __main__ as CLI
 
 
 def _rec(**kw) -> dict:
@@ -566,3 +567,78 @@ def test_a_complete_answer_carries_no_gap_block(monkeypatch):
     monkeypatch.setattr(S, "_feed", _no_refresh, raising=False)
     out = asyncio.run(S.breach_news(since_days=7))
     assert "incomplete" not in out
+
+
+def test_fastmcp_dispatch_emits_one_allowlisted_activation(monkeypatch):
+    events = []
+    monkeypatch.setattr(S.mcp, "_hosted_telemetry", True)
+    monkeypatch.setattr(S, "_emit_mcp_activation",
+                        lambda tool, outcome: events.append((tool, outcome)))
+
+    result = asyncio.run(S.mcp.call_tool(
+        "assess_threat", {"text": "Routine security update."}))
+
+    assert result
+    assert events == [("assess_threat", "success")]
+
+
+def test_fastmcp_dispatch_records_known_errors_without_arguments(monkeypatch):
+    events = []
+    monkeypatch.setattr(S.mcp, "_hosted_telemetry", True)
+    monkeypatch.setattr(S, "_emit_mcp_activation",
+                        lambda tool, outcome: events.append((tool, outcome)))
+
+    with pytest.raises(Exception):
+        asyncio.run(S.mcp.call_tool("assess_threat", {}))
+
+    assert events == [("assess_threat", "error")]
+
+
+def test_fastmcp_normal_return_with_error_payload_is_an_error(monkeypatch):
+    events = []
+    monkeypatch.setattr(S.mcp, "_hosted_telemetry", True)
+    monkeypatch.setattr(S, "_emit_mcp_activation",
+                        lambda tool, outcome: events.append((tool, outcome)))
+
+    result = asyncio.run(S.mcp.call_tool("assess_threat", {"text": "   "}))
+
+    assert result
+    assert events == [("assess_threat", "error")]
+
+
+def test_fastmcp_unknown_probe_never_reaches_the_journal(monkeypatch):
+    events = []
+    monkeypatch.setattr(S.mcp, "_hosted_telemetry", True)
+    marker = "__verifymcp_auth_probe_private-name"
+    monkeypatch.setattr(S, "_emit_mcp_activation",
+                        lambda tool, outcome: events.append((tool, outcome)))
+
+    with pytest.raises(Exception):
+        asyncio.run(S.mcp.call_tool(marker, {}))
+
+    assert events == [("unknown", "error")]
+    assert marker not in repr(events)
+
+
+def test_local_stdio_dispatch_stays_telemetry_quiet(monkeypatch):
+    events = []
+    monkeypatch.setattr(S.mcp, "_hosted_telemetry", False)
+    monkeypatch.setattr(S, "_emit_mcp_activation",
+                        lambda tool, outcome: events.append((tool, outcome)))
+
+    result = asyncio.run(S.mcp.call_tool(
+        "assess_threat", {"text": "Routine security update."}))
+
+    assert result
+    assert events == []
+
+
+def test_http_cli_arms_hosted_telemetry(monkeypatch):
+    runs = []
+    monkeypatch.setattr(S.mcp, "_hosted_telemetry", False)
+    monkeypatch.setattr(S.mcp, "run", lambda **kwargs: runs.append(kwargs))
+
+    assert CLI.main(["--http", "--host", "127.0.0.1", "--port", "8790"]) == 0
+
+    assert S.mcp._hosted_telemetry is True
+    assert runs == [{"transport": "streamable-http"}]

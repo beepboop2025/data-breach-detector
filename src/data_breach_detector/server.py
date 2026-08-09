@@ -24,8 +24,10 @@ and never returns the raw text of a dump, paste or leak.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -84,7 +86,61 @@ breach headline plus LiquiLens answers what a breach headline alone
 cannot: whether the victim can absorb it.
 """
 
-mcp = FastMCP(
+
+def _emit_mcp_activation(tool: str, outcome: str) -> None:
+    """Write the fleet's bounded activation event to the service journal."""
+    print(
+        f"mcp_activation product=breach surface=public "
+        f"tool={tool} outcome={outcome} origin=unknown",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _mcp_result_is_error(result) -> bool:
+    """Recognize tools' deliberate error payloads after FastMCP conversion."""
+    if isinstance(result, dict):
+        return "error" in result
+    if not isinstance(result, (list, tuple)):
+        return False
+    for block in result:
+        text = getattr(block, "text", None)
+        if not isinstance(text, str) or not text.lstrip().startswith("{"):
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "error" in payload:
+            return True
+    return False
+
+
+class TelemetryFastMCP(FastMCP):
+    """Observe protocol tool dispatch without wrapping the seven tool bodies.
+
+    FastMCP registers this method as the tools/call boundary. The CLI enables
+    emission only for hosted HTTP, so local stdio and ordinary library use stay
+    quiet. Only a manager-known name can enter a log.
+    """
+
+    _hosted_telemetry = False
+
+    async def call_tool(self, name: str, arguments: dict):
+        tool = name if self._tool_manager.get_tool(name) is not None else "unknown"
+        try:
+            result = await super().call_tool(name, arguments)
+        except Exception:
+            if self._hosted_telemetry:
+                _emit_mcp_activation(tool, "error")
+            raise
+        if self._hosted_telemetry:
+            _emit_mcp_activation(tool, "error" if _mcp_result_is_error(result)
+                                 else "success")
+        return result
+
+
+mcp = TelemetryFastMCP(
     "data-breach-detector",
     instructions=INSTRUCTIONS,
     website_url="https://github.com/beepboop2025/data-breach-detector",
@@ -93,6 +149,11 @@ mcp = FastMCP(
 # serverInfo reports the mcp SDK's own version (1.28.1 shipped for weeks)
 # to every client and directory scanner. The low-level server carries it.
 mcp._mcp_server.version = SERVER_VERSION
+
+
+def enable_hosted_telemetry() -> None:
+    """Arm journald activation events for the public HTTP process only."""
+    mcp._hosted_telemetry = True
 
 HIBP_BREACHES = "https://haveibeenpwned.com/api/v3/breaches"
 RANSOMLOOK_RECENT = "https://www.ransomlook.io/api/recent"
