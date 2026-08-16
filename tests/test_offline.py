@@ -426,6 +426,7 @@ def test_one_version_constant_reaches_every_surface():
     a test can hold them together. Read with a regex rather than tomllib,
     which only exists from 3.11 and the floor here is 3.10.
     """
+    import json
     import pathlib
     import re as _re
 
@@ -435,13 +436,15 @@ def test_one_version_constant_reaches_every_surface():
     root = pathlib.Path(__file__).resolve().parents[1]
     pyproject = _re.search(r'(?m)^version = "([^"]+)"',
                            (root / "pyproject.toml").read_text(encoding="utf-8"))
-    manifest = _re.findall(r'"version": "([^"]+)"',
-                           (root / "server.json").read_text(encoding="utf-8"))
+    manifest_text = (root / "server.json").read_text(encoding="utf-8")
+    manifest = _re.findall(r'"version": "([^"]+)"', manifest_text)
+    manifest_json = json.loads(manifest_text)
     assert __version__ == SERVER_VERSION
     assert S.mcp._mcp_server.version == SERVER_VERSION
     assert SERVER_VERSION in S._UA
     assert pyproject and pyproject.group(1) == SERVER_VERSION
     assert manifest and set(manifest) == {SERVER_VERSION}
+    assert manifest_json["$schema"].endswith("/2025-12-11/server.schema.json")
 
 
 # --- resilience ---------------------------------------------------------
