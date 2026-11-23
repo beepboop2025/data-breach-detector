@@ -443,10 +443,12 @@ def test_one_version_constant_reaches_every_surface():
     assert SERVER_VERSION in S._UA
     assert pyproject and pyproject.group(1) == SERVER_VERSION
     assert manifest_json["version"] == SERVER_VERSION
-    # PyPI 0.3.1 remains the latest installable stdio artifact. The hosted
-    # endpoint can advance independently, but the card must never invent a
-    # package version that does not exist.
-    assert manifest_json["packages"][0]["version"] == "0.3.1"
+    # 0.4.0 retired the hosted endpoint, so the PyPI package is the only
+    # artifact and the card's package version moves with the server version.
+    # The card must still never name a package version that does not exist:
+    # a release publishes to PyPI first and the registry card second.
+    assert manifest_json["packages"][0]["version"] == SERVER_VERSION
+    assert "remotes" not in manifest_json, "the hosted endpoint was retired in 0.4.0"
     assert manifest_json["$schema"].endswith("/2025-12-11/server.schema.json")
 
 

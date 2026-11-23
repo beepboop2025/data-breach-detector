@@ -105,7 +105,8 @@ Or point an MCP client at the config:
 } } }
 ```
 
-Hosted remote: `https://breach.seiche.info/mcp`
+There is no hosted endpoint. Run it locally over stdio, or self-host it over
+streamable HTTP with `data-breach-detector --http`.
 
 ## License
 

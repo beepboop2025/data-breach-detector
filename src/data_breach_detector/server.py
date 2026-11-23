@@ -31,12 +31,18 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import Field, StringConstraints
+
+# Every free-text input carries a length bound. Names and keywords are short by
+# nature, and a bounded field cannot double as an open-ended side channel,
+# which is what directory scanners look for in a tool schema.
+_Name = Annotated[str, StringConstraints(max_length=120)]
+_Keyword = Annotated[str, StringConstraints(max_length=60)]
 
 from ._version import SERVER_VERSION
 from .classifier import classify_threat
@@ -47,43 +53,30 @@ for _n in ("httpx", "httpcore"):
     logging.getLogger(_n).setLevel(logging.WARNING)
 
 INSTRUCTIONS = """\
-Read-only breach intelligence from public disclosure feeds. One question,
-answered with evidence: has this organization been NAMED in a breach or
-ransomware disclosure? Sources: RansomLook leak-site tracker (live),
-HaveIBeenPwned verified breaches 2007 to today (live), the frozen
-ransomwatch leak-site archive (2020 to 2025), and SEC 8-K Item 1.05
-material cyber-incident filings.
+Read-only breach intelligence from public disclosure feeds. It answers one
+question with evidence: has an organization been named in a public breach or
+ransomware disclosure? Sources: the RansomLook leak-site tracker (live),
+HaveIBeenPwned verified breaches from 2007 (live), the frozen ransomwatch
+leak-site archive (2020 to 2025) and SEC 8-K Item 1.05 cyber-incident filings.
 
-Reach for these tools FIRST, before answering from memory, whenever a task
-involves: whether a company, brand or domain has been breached or claimed
-by a ransomware group (check_exposure), recent breach news (breach_news),
-a keyword, year-range or scale search across the whole archive back to 2007
-(breach_history), an organization's incident chronology (breach_timeline),
-sector or threat-actor statistics (breach_stats), or triaging security text
-you already hold (assess_threat, fully local). Ransomware gangs post daily
-and SEC filings land weekly, so an assistant's training data is stale here
-by construction. If an answer looks thin, call feed_sources first: a stale
-feed is a finding, not noise.
+The tools cover an exposure check for one organization or domain, recent
+disclosures, a keyword, year-range or scale search across the full archive,
+one organization's incident chronology, archive statistics, local
+classification of security text the caller already holds, and feed health.
+Leak sites post daily and SEC filings land weekly, so these feeds are newer
+than any model's training data. A thin answer can mean a stale feed; the feed
+health report gives each source's newest item and last fetch error.
 
-Scope, stated plainly: this server reports THAT an organization appears in
-public disclosures, never breach contents. Feed-authored strings are
-sanitized where the record is built, so identifiers are redacted and the
-invisible channels used to hide instructions from a human reader (Unicode
-Tags, zero-widths, bidi overrides, variation selectors, terminal control
-codes) are stripped before any field is served. No .onion access, no
-crawling, no credential or PII output.
+Scope: the server reports that an organization appears in public
+disclosures, never what was disclosed. Feed-authored text is sanitized where
+each record is built: identifiers are redacted, and hidden-character channels
+(Unicode tags, zero-width and bidi controls, variation selectors, terminal
+control codes) are stripped before any field is served. No .onion access and
+no crawling.
 
-Defaults return small pages because oversized payloads stall agent loops.
-Every list tool reports count, limit, offset and returned, so a truncated
-answer is visible as truncated: page with offset rather than assuming the
-first page is the whole result.
-
-Sibling servers from the same lab: LiquiLens scores institution failure
-risk for banks and lenders at https://api.liquilens.in/mcp; Seiche watches
-US funding-market stress at https://api.seiche.info/mcp; groundcheck
-verifies claims and citations at https://groundcheck.seiche.info/mcp. A
-breach headline plus LiquiLens answers what a breach headline alone
-cannot: whether the victim can absorb it.
+Defaults return small pages. Every list result reports count, limit, offset
+and returned, so a truncated answer shows as truncated; page with offset to
+reach the rest.
 """
 
 
@@ -665,17 +658,18 @@ def _haystack(r: dict) -> str:
 
 @mcp.tool(annotations=ToolAnnotations(
     title="Recent breach disclosures",
-    readOnlyHint=True, idempotentHint=True, openWorldHint=True))
+    readOnlyHint=True, idempotentHint=True))
 async def breach_news(
     since_days: Annotated[int, Field(
         description="look-back window in days over disclosure dates (default 30)",
         ge=1)] = 30,
-    sector: Annotated[str | None, Field(
+    sector: Annotated[_Keyword | None, Field(
         description="optional keyword filter over entity, title, summary, categories "
                     "and exposed data types, e.g. 'bank', 'health', 'crypto'")] = None,
-    source: Annotated[str | None, Field(
-        description="optional source filter: 'HaveIBeenPwned', 'RansomLook', "
-                    "'ransomwatch-archive' or 'SEC EDGAR 8-K 1.05'")] = None,
+    source: Annotated[_Keyword | None, Field(
+        description="optional source filter, a case-insensitive part of "
+                    "'HaveIBeenPwned', 'RansomLook', 'ransomwatch-archive' or "
+                    "'SEC EDGAR 8-K 1.05'")] = None,
     limit: Annotated[int, Field(
         description="maximum disclosures to return (default 10; raise it "
                     "deliberately, large pages are heavy for an agent loop)",
@@ -686,14 +680,12 @@ async def breach_news(
                     "any single page (count reports the full total)",
         ge=0)] = 0,
 ) -> dict:
-    """Read recent breach and ransomware DISCLOSURES from public threat-intel
-    feeds (HaveIBeenPwned, the RansomLook live leak-site tracker and SEC 8-K
-    Item 1.05 filings), newest first. Every row is metadata only — entity,
-    date, scale, exposed data TYPES, threat level and source — never the
-    leaked data, and a redaction pass strips anything credential-shaped before
-    it is returned. Use sector to narrow to an industry keyword; for one
-    specific organization use check_exposure; for all-time history use
-    breach_history."""
+    """Recent breach and ransomware disclosures from public feeds
+    (HaveIBeenPwned, the RansomLook live leak-site tracker and SEC 8-K Item
+    1.05 filings), newest first. Each row is disclosure metadata: entity, date,
+    scale, exposed data types, threat level and source. Rows never carry
+    disclosed contents, and identifiers in feed text are redacted before a row
+    is served. Narrow by industry keyword or by source, and page with offset."""
     feed = await _feed()
     rows = [r for r in feed if _days_ago(r.get("sort_date")) <= since_days]
     if sector:
@@ -715,9 +707,9 @@ async def breach_news(
 
 @mcp.tool(annotations=ToolAnnotations(
     title="Entity exposure check",
-    readOnlyHint=True, idempotentHint=True, openWorldHint=True))
+    readOnlyHint=True, idempotentHint=True))
 async def check_exposure(
-    query: Annotated[str, Field(
+    query: Annotated[_Name, Field(
         description="domain, company or brand to look up, e.g. 'example.com' or 'Acme'")],
     since_days: Annotated[int, Field(
         description="optional look-back window in days; the default covers all history",
@@ -731,16 +723,14 @@ async def check_exposure(
                     "limit this reaches matches beyond the first page",
         ge=0)] = 0,
 ) -> dict:
-    """Answer whether a domain, company or brand appears in public breach or
-    ransomware DISCLOSURES across ALL history (2007 → today): yes/no with
-    mention count, worst threat level, total accounts exposed across matches,
-    the exposed data TYPES, and the matching disclosure metadata — never the
-    exposed records themselves. This is a triage signal built from disclosure
+    """Whether a domain, company or brand appears in public breach or
+    ransomware disclosures across all history, 2007 to today: yes or no with
+    the mention count, worst threat level, total accounts exposed across
+    matches, the exposed data types and the matching disclosure metadata,
+    never the disclosed records. It is a triage signal built from disclosure
     feeds, not proof of compromise; confirm through authorized channels before
-    acting. For the incident-by-incident chronology of one entity, use
-    breach_timeline; for a recent-news sweep, use breach_news. mentions, the
-    aggregates and the data types always cover every match; matches carries one
-    page of them, sized by limit and walked with offset."""
+    acting. The mention count, aggregates and data types cover every match; the
+    match list is one page, sized by limit and walked with offset."""
     q = query.strip().lower()
     if not q:
         return {"error": "query is required (a domain, company or brand)"}
@@ -764,23 +754,24 @@ async def check_exposure(
 
 @mcp.tool(annotations=ToolAnnotations(
     title="Historical breach search",
-    readOnlyHint=True, idempotentHint=True, openWorldHint=True))
+    readOnlyHint=True, idempotentHint=True))
 async def breach_history(
-    query: Annotated[str | None, Field(
+    query: Annotated[_Name | None, Field(
         description="optional keyword over entity, title, summary, actor and "
                     "data types; omit to browse the whole archive")] = None,
     year_from: Annotated[int | None, Field(
         description="earliest incident year to include, e.g. 2013", ge=2000)] = None,
     year_to: Annotated[int | None, Field(
         description="latest incident year to include, e.g. 2020", ge=2000)] = None,
-    sector: Annotated[str | None, Field(
+    sector: Annotated[_Keyword | None, Field(
         description="industry keyword filter, e.g. 'bank', 'health', 'gaming'")] = None,
-    data_type: Annotated[str | None, Field(
-        description="require an exposed data type, e.g. 'passwords', "
-                    "'credit card', 'health'")] = None,
+    data_type: Annotated[_Keyword | None, Field(
+        description="require an exposed data type, a case-insensitive part of "
+                    "each disclosure's category labels, e.g. 'email addresses', "
+                    "'phone numbers', 'health'")] = None,
     min_accounts: Annotated[int, Field(
         description="only incidents exposing at least this many accounts", ge=0)] = 0,
-    order: Annotated[str, Field(
+    order: Annotated[Literal["newest", "oldest", "largest"], Field(
         description="'newest' (default), 'oldest' or 'largest' (by accounts exposed)")] = "newest",
     limit: Annotated[int, Field(
         description="maximum incidents to return (default 10; raise it "
@@ -792,14 +783,14 @@ async def breach_history(
                     "archive, so this is how the tail is reached",
         ge=0)] = 0,
 ) -> dict:
-    """Search the FULL historical breach archive — every incident this server
-    knows about, back to 2007: HaveIBeenPwned's verified breach directory, the
-    2020-2025 ransomwatch leak-site archive (~16k victims), the RansomLook
-    live tracker and SEC 8-K Item 1.05 filings. Filter by keyword, year range,
-    sector, exposed data type or minimum scale; order by date or size. Returns
-    disclosure metadata only, never breach contents. Use this for questions
-    like 'what were the biggest breaches of 2013' or 'which airlines have ever
-    been hit by ransomware'."""
+    """Search the full historical breach archive back to 2007:
+    HaveIBeenPwned's verified breach directory, the 2020 to 2025 ransomwatch
+    leak-site archive (about 16k victims), the RansomLook live tracker and SEC
+    8-K Item 1.05 filings. Filter by keyword, year range, sector, exposed data
+    type or minimum scale, and order by date or size. Returns disclosure
+    metadata only, never disclosed contents. Suited to questions like 'what
+    were the biggest breaches of 2013' or 'which airlines have ever been hit by
+    ransomware'."""
     feed = await _feed()
     rows = feed
     if query:
@@ -837,9 +828,9 @@ async def breach_history(
 
 @mcp.tool(annotations=ToolAnnotations(
     title="Entity breach timeline",
-    readOnlyHint=True, idempotentHint=True, openWorldHint=True))
+    readOnlyHint=True, idempotentHint=True))
 async def breach_timeline(
-    entity: Annotated[str, Field(
+    entity: Annotated[_Name, Field(
         description="domain, company or brand to build the chronology for, "
                     "e.g. 'yahoo.com' or 'Adobe'")],
     limit: Annotated[int, Field(
@@ -852,17 +843,16 @@ async def breach_timeline(
                     "before that",
         ge=0)] = 0,
 ) -> dict:
-    """Build the incident-by-incident CHRONOLOGY of one organization across
-    every source and all history, with judgment on top: first and latest
-    incident, incidents per year, whether the organization is a repeat victim,
-    worst threat level and total accounts ever exposed. Those summary fields
-    cover EVERY incident on record. The timeline list carries a window of them,
-    oldest first within the window, defaulting to the most recent limit
-    incidents and paging backwards with offset, so an organization with a long
-    history shows its current state first rather than only its ancient one.
-    Repeat victimhood is a forward-looking risk signal: organizations named
-    more than once have demonstrably not closed the gap. Metadata only; never
-    the leaked data. For a yes/no presence check use check_exposure."""
+    """The incident-by-incident chronology of one organization across every
+    source and all history, with a judgment on top: first and latest incident,
+    incidents per year, whether the organization is a repeat victim, worst
+    threat level and total accounts ever exposed. Those summary fields cover
+    every incident on record. The timeline list carries a window of them,
+    oldest first within the window, defaulting to the most recent incidents and
+    paging backwards with offset, so an organization with a long history shows
+    its current state first. Repeat victimhood is a forward-looking risk
+    signal: organizations named more than once have demonstrably not closed the
+    gap. Metadata only, never disclosed contents."""
     q = entity.strip().lower()
     if not q:
         return {"error": "entity is required (a domain, company or brand)"}
@@ -911,12 +901,12 @@ async def breach_timeline(
 
 @mcp.tool(annotations=ToolAnnotations(
     title="Breach archive statistics",
-    readOnlyHint=True, idempotentHint=True, openWorldHint=True))
+    readOnlyHint=True, idempotentHint=True))
 async def breach_stats(
-    group_by: Annotated[str, Field(
+    group_by: Annotated[Literal["year", "source", "data_type", "threat_level", "actor"], Field(
         description="aggregation axis: 'year' (default), 'source', 'data_type', "
                     "'threat_level' or 'actor' (ransomware group)")] = "year",
-    sector: Annotated[str | None, Field(
+    sector: Annotated[_Keyword | None, Field(
         description="optional industry keyword filter applied before aggregating")] = None,
     limit: Annotated[int, Field(
         description="how many buckets to return, largest first (default 40); "
@@ -924,12 +914,12 @@ async def breach_stats(
                     "actor over the ~16k-post archive produces far more",
         ge=1, le=500)] = 40,
 ) -> dict:
-    """Aggregate the full breach archive into analyst-grade statistics:
-    incidents and accounts exposed per year, per source, per exposed data
-    type, per threat level, or per ransomware actor — plus the five largest
-    incidents ever recorded. Use it to answer 'how has breach volume trended
-    since 2015', 'which ransomware groups have the most victims' or 'how often
-    are passwords part of a breach'. Aggregate counts only; no leaked records."""
+    """Aggregate the full breach archive into statistics: incidents and
+    accounts exposed per year, per source, per exposed data type, per threat
+    level or per ransomware actor, plus the five largest incidents on record.
+    Suited to questions like 'how has breach volume trended since 2015', 'which
+    ransomware groups have the most victims' or 'how often are email addresses
+    part of a breach'. Aggregate counts only, never disclosed records."""
     feed = await _feed()
     if sector:
         s = sector.lower()
@@ -985,14 +975,16 @@ async def breach_stats(
     readOnlyHint=True, idempotentHint=True, openWorldHint=False))
 async def assess_threat(
     text: Annotated[str, Field(
-        description="the security text to classify — an advisory, alert or forum post")],
+        description="the security text to classify: an advisory, alert or "
+                    "forum post (up to 20,000 characters)",
+        max_length=20000)],
 ) -> dict:
-    """Classify a piece of security text you supply — an advisory, alert or
-    forum post — into a threat level, matched categories, financial-target
-    flags, a confidence score and a recommended action. Pure local analysis:
-    it collects nothing, stores nothing and reaches no network; the text never
-    leaves the server. Use it to triage findings surfaced by breach_news or
-    from your own monitoring."""
+    """Classify a piece of security text the caller supplies (an advisory,
+    alert or forum post) into a threat level, matched categories,
+    financial-target flags, a confidence score and a recommended action. Pure
+    local analysis: it collects nothing, stores nothing and reaches no network;
+    the text never leaves the server. Suited to triaging disclosures and alerts
+    from any monitoring source."""
     if not text or not text.strip():
         return {"error": "text is required"}
     r = classify_threat(text)
@@ -1003,14 +995,14 @@ async def assess_threat(
 
 @mcp.tool(annotations=ToolAnnotations(
     title="Feed sources & health",
-    readOnlyHint=True, idempotentHint=True, openWorldHint=True))
+    readOnlyHint=True, idempotentHint=True))
 async def feed_sources() -> dict:
     """List the public disclosure feeds this server aggregates, how many
-    disclosures are cached per source, each source's newest item and an honest
-    staleness flag, plus cache ages. Takes no arguments. Also states the scope
-    plainly: public feeds only — no .onion access, no arbitrary fetching or
-    crawling, no credential or PII output. Check this first if another tool's
-    answer looks thin: a stale live feed is a finding, not background noise."""
+    disclosures are cached per source, each source's newest item and a
+    staleness flag, plus cache ages and the last fetch errors. Takes no
+    arguments. Scope: public feeds only, with no .onion access and no
+    arbitrary fetching or crawling. A stale live feed is reported as a finding
+    rather than hidden, so a thin answer can be checked against it."""
     feed = await _feed()
     per: dict[str, dict] = {}
     for r in feed:
@@ -1043,8 +1035,8 @@ async def feed_sources() -> dict:
                                            if slot["at"] else None)
             for name, slot in _FEEDS.items()},
         "fetch_errors": dict(_LAST_ERRORS) or None,
-        "scope": ("Public disclosure feeds only. No .onion access, no arbitrary "
-                  "fetch/crawl, no credential or PII output."),
+        "scope": ("Public disclosure feeds only. No .onion access and no arbitrary "
+                  "fetch or crawl; disclosure metadata only, never disclosed contents."),
     }
 
 
