@@ -33,6 +33,7 @@ MAX_BODY = 65536
 class Notice(BaseHTTPRequestHandler):
     server_version = "retired-endpoint"
     sys_version = ""
+    timeout = 10  # socket timeout: a slow sender cannot hold a thread open
 
     def _send(self, status: int, body: bytes, ctype: str) -> None:
         self.send_response(status)
@@ -50,12 +51,21 @@ class Notice(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 (http.server naming)
         rid = None
         try:
-            length = min(int(self.headers.get("Content-Length") or 0), MAX_BODY)
-            payload = json.loads(self.rfile.read(length) or b"null")
-            if isinstance(payload, dict):
-                rid = payload.get("id")
-        except (ValueError, OSError):
-            pass
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        # Read only a declared, bounded body. A negative length would make
+        # read() consume the stream until the client closes it, and an
+        # oversized one is answered without being read at all.
+        if 0 < length <= MAX_BODY:
+            try:
+                payload = json.loads(self.rfile.read(length))
+                candidate = payload.get("id") if isinstance(payload, dict) else None
+                if isinstance(candidate, (str, int)) and not isinstance(candidate, bool):
+                    rid = candidate
+            except (ValueError, OSError):
+                pass
+        self.close_connection = True
         body = {"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": MESSAGE}}
         self._send(410, json.dumps(body).encode(), "application/json")
 
