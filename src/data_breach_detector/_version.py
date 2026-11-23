@@ -13,4 +13,4 @@ asserts all of them agree rather than trusting the next bump to touch every
 file.
 """
 
-SERVER_VERSION = "0.3.2"
+SERVER_VERSION = "0.4.0"
