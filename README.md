@@ -9,19 +9,19 @@ public disclosure feeds — and reports **intelligence, not contents**: the
 existence, timing, scale, category and exposed data-*types* of a breach, never
 the leaked records themselves.
 
-Built for defenders and for agents that work on their behalf.
+Built for defensive investigation and automated security workflows.
 
-## Why this instead of the alternatives
+## Design choices
 
-Most breach tooling sits in one of three camps, and each has a structural gap:
+The server differs from several common breach-data products:
 
 - **Consumer checkers** (HaveIBeenPwned's site) answer one question — "is my
   email in a breach" — one account at a time, one source at a time.
-- **Leak-data brokers** (DeHashed, IntelX, LeakCheck and the like) sell access
-  to the leaked records themselves. Wiring one into an AI agent hands the
-  agent stolen credentials.
-- **Enterprise intel platforms** (SpyCloud, Recorded Future, Flashpoint) do
-  the join properly — behind five-figure contracts and closed APIs.
+- **Leak-data brokers** (DeHashed, IntelX, LeakCheck and similar services) sell
+  access to leaked records. Passing those records into a downstream workflow
+  creates an additional disclosure risk.
+- **Enterprise intelligence platforms** (SpyCloud, Recorded Future, Flashpoint)
+  combine multiple sources through commercial products and APIs.
 
 This server takes a fourth position:
 
@@ -29,8 +29,7 @@ This server takes a fourth position:
    directory (HIBP), a *live* ransomware leak-site tracker (RansomLook), a
    ~16k-victim leak-site archive back to 2020 (ransomwatch), and SEC 8-K
    Item 1.05 filings — companies' own legally mandated "material cybersecurity
-   incident" disclosures. Regulator-grade and criminal-infrastructure-grade
-   evidence in the same index. No key, no contract.
+   incident" disclosures. The sources are queried through one index.
 2. **History is first-class.** `breach_history`, `breach_timeline` and
    `breach_stats` treat 2007→today as the product, not a cache: every breach
    of 2013, an organization's full incident chronology, repeat-victim
@@ -42,16 +41,15 @@ This server takes a fourth position:
    credential-shaped tokens are redacted, and the invisible channels used to
    hide instructions from a human reader (Unicode Tags, zero-widths, bidi
    overrides, variation selectors, terminal control codes) are stripped. That
-   matters because leak-site titles are written by ransomware crews and read
-   by agents: the same field is both intelligence and an injection surface.
+   matters because leak-site titles are written by ransomware crews and may be
+   read by a language model: the same field is both intelligence and an injection surface.
    Redacting only the two fields a human looks at is not enough, because ids,
    actor names and statistic bucket keys are built from the same strings.
-4. **Honesty is instrumented.** `feed_sources` reports each feed's newest
+4. **Source health is explicit.** `feed_sources` reports each feed's newest
    item, a staleness flag and the last fetch error — a dead upstream is a
    served fact, not a silent hole. (The ransomwatch project itself froze in
    June 2025; this server says so instead of pretending.)
-5. **MCP-native, free, MIT, self-hostable.** One `pip install`, stdio or
-   streamable-HTTP.
+5. **MCP transport.** Install with `pip`; run over stdio or streamable HTTP.
 
 ## What it does not do
 
